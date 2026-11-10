@@ -1,0 +1,6 @@
+node_modules/
+lib/seeds/personal.js
+test/personal-seeds.test.mjs
+docs/
+CON
+*.log
