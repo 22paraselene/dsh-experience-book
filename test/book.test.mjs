@@ -543,7 +543,10 @@ test('同一回合命中超过上限时只注入 maxHintsPerTurn 条', async () 
   const harness = createHarness();
   apply(harness.ctx, { seedOnFirstRun: false });
   const add = harness.tools.get('experience_add');
-  for (const word of ['alpha', 'beta', 'gamma', 'delta', 'epsilon']) {
+  for (const word of [
+    'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta',
+    'eta', 'theta', 'iota', 'kappa', 'lambda', 'mu',
+  ]) {
     await add.execute({
       id: `t-limit-${word}`,
       kind: 'output',
@@ -561,7 +564,7 @@ test('同一回合命中超过上限时只注入 maxHintsPerTurn 条', async () 
       message: {
         role: 'assistant',
         content: [
-          { type: 'text', text: 'alpha beta gamma delta epsilon 全部命中。' },
+          { type: 'text', text: 'alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu 全部命中。' },
           { type: 'tool-call', name: 'pwsh', arguments: {} },
         ],
       },
@@ -569,11 +572,11 @@ test('同一回合命中超过上限时只注入 maxHintsPerTurn 条', async () 
   };
 
   emit(assistant);
-  assert.equal(harness.injected.length, 3, '五条命中时只注入上限三条');
-  assert.equal(new Set(harness.injected.map((message) => message.id)).size, 3);
+  assert.equal(harness.injected.length, 10, '十二条命中时只注入上限十条');
+  assert.equal(new Set(harness.injected.map((message) => message.id)).size, 10);
 
   emit(assistant);
-  assert.equal(harness.injected.length, 3, '上限内已注入的不再重复');
+  assert.equal(harness.injected.length, 10, '上限内已注入的不再重复');
   __resetExperienceBookForTests();
 });
 
