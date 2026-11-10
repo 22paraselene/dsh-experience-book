@@ -373,6 +373,7 @@ function createHarness(storage) {
   const handlers = new Map();
   const injected = [];
   const tools = new Map();
+  const sections = [];
   const session = {
     id: `s-${Math.random().toString(16).slice(2)}`,
     header: { cwd: 'C:\\proj', agentPreset: 'standard' },
@@ -398,12 +399,12 @@ function createHarness(storage) {
       if (name === 'agents') return new Map([[session.id, agent]]);
       return undefined;
     },
-    systemPrompt: { section() {} },
+    systemPrompt: { section(definition) { sections.push(definition); } },
     tools: { register(definition) { tools.set(definition.name, definition); } },
     effect() {},
     logger: { info() {}, warn() {} },
   };
-  return { ctx, session, agent, handlers, injected, tools };
+  return { ctx, session, agent, handlers, injected, tools, sections };
 }
 
 function createStorageMock({ stored = null, failOpens = 0 } = {}) {
@@ -688,5 +689,24 @@ test('系统条目只收通用做法且带 system 分类', () => {
   for (const item of SYSTEM_SEEDS) {
     assert.equal(item.mode, '', item.id);
     assert.equal(item.workspace, '', item.id);
+    assert.deepEqual(item.tools, [], item.id);
   }
+  assert.doesNotMatch(
+    JSON.stringify(SYSTEM_SEEDS),
+    /paihuo|派活|pwsh|personal|t-fullrun|t-merge|t-reuse/i,
+  );
+});
+
+test('公开系统提示与工具说明不依赖本地条目或其他插件', () => {
+  __resetExperienceBookForTests();
+  const harness = createHarness();
+  apply(harness.ctx, { seedOnFirstRun: false });
+  const section = harness.sections.find((item) => item.name === 'experience-book');
+  assert.ok(section);
+  assert.match(section.text, /填 mode 只在指定会话模式触发/);
+  assert.doesNotMatch(section.text, /paihuo|派活|personal|t-fullrun|t-merge|t-reuse/i);
+
+  const definitions = createTools(createStore({ triggers: [] }));
+  assert.doesNotMatch(JSON.stringify(definitions), /paihuo|派活|pwsh/i);
+  __resetExperienceBookForTests();
 });
