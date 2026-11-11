@@ -1,9 +1,21 @@
 {
-  "name": "@local/dsh-experience-book",
-  "version": "1.1.0",
-  "private": true,
+  "name": "dsh-experience-book",
+  "version": "1.2.0",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22paraselene/dsh-experience-book.git"
+  },
+  "homepage": "https://github.com/22paraselene/dsh-experience-book#readme",
+  "bugs": {
+    "url": "https://github.com/22paraselene/dsh-experience-book/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "license": "MIT",
-  "description": "自成长工作经验书：按输出关键词、工具报错和工具调用触发一句话经验提示；system 分类与可隔离的系统条目（全局生效），model 条件可按模型 ID 门控",
+  "keywords": ["dsh-plugin", "experience", "prompt", "feedback"],
+  "description": "工作经验书：按输出、工具与工作区触发一句话提示，支持命中预检、误报反馈和导入导出",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
@@ -17,6 +29,7 @@
     "lib/index.js",
     "lib/persistence.js",
     "lib/tools.js",
+    "lib/transfer.js",
     "lib/seeds/helper.js",
     "lib/seeds/index.js",
     "lib/seeds/system.js",

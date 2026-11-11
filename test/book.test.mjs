@@ -16,6 +16,8 @@ import {
   matchesTrigger,
   modeMatches,
   normalizeState,
+  recordInjections,
+  recordTrigger,
   removeTriggers,
   scopeLabel,
   upgradeState,
@@ -138,8 +140,8 @@ test('addTrigger 自动生成合法 id 并保留默认值', () => {
   assert.equal(result.trigger.hits, 0);
 });
 
-test('updateTrigger 合并字段并保留命中数', () => {
-  const existing = trigger({ hits: 7 });
+test('updateTrigger 合并字段并保留触发、注入与反馈统计', () => {
+  const existing = trigger({ hits: 7, triggerCount: 7, injectedCount: 4, usefulCount: 2, falsePositiveCount: 1 });
   const result = updateTrigger({ version: 1, triggers: [existing] }, {
     id: 't-test',
     hint: '建目录前先列父目录，再一次建全层级。',
@@ -148,6 +150,10 @@ test('updateTrigger 合并字段并保留命中数', () => {
   assert.equal(result.trigger.hint, '建目录前先列父目录，再一次建全层级。');
   assert.deepEqual(result.trigger.keywords, ['mkdir']);
   assert.equal(result.trigger.hits, 7);
+  assert.equal(result.trigger.triggerCount, 7);
+  assert.equal(result.trigger.injectedCount, 4);
+  assert.equal(result.trigger.usefulCount, 2);
+  assert.equal(result.trigger.falsePositiveCount, 1);
 });
 
 test('looksInstructive 识别报错里已有的正确格式指引', () => {
@@ -289,9 +295,14 @@ test('宿主在 session/event 派发期间拒绝 append 时，提示经微任务
     },
   });
   assert.equal(delivered.length, 0, '派发期间注入被宿主拒绝');
+  let item = __experienceBookStateForTests().store.get().triggers.find((trigger) => trigger.id === 't-reentrant');
+  assert.equal(item.triggerCount, 1);
+  assert.equal(item.injectedCount, 0, '首次注入被拒绝不能计为成功');
   publishing = false;
   await Promise.resolve();
   assert.equal(delivered.length, 1, '派发结束后微任务重投成功');
+  item = __experienceBookStateForTests().store.get().triggers.find((trigger) => trigger.id === 't-reentrant');
+  assert.equal(item.injectedCount, 1);
   assert.match(delivered[0].id, /^exp-t-reentrant-[0-9a-f]{8}-[0-9]+$/);
   __resetExperienceBookForTests();
 });
@@ -376,6 +387,128 @@ test('工具写入保留迁移标记', async () => {
   await tools.experience_remove.execute({ ids: ['t-tool-probe'] });
   assert.deepEqual(store.get().migrations, [3, 4, 5]);
   assert.equal(store.get().triggers.some((item) => item.id === 't-tool-probe'), false);
+});
+
+test('experience_check 是 dry-run，命中与未命中都不写统计', async () => {
+  const store = createStore(createEmptyState());
+  const tools = Object.fromEntries(createTools(store).map((item) => [item.name, item]));
+  await tools.experience_add.execute({
+    id: 't-check',
+    kind: 'output',
+    hint: '先检查合并请求再执行。',
+    keywords: ['merge'],
+    requireAll: ['request'],
+    workspace: 'proj',
+    model: '^k3\\.1',
+  });
+  const hit = await tools.experience_check.execute({
+    text: 'Review this merge request.',
+    workspace: 'C:\\proj',
+    modelId: 'k3.1-pro',
+  });
+  assert.match(hit.text, /1 条会命中/);
+  assert.match(hit.text, /t-check/);
+  const miss = await tools.experience_check.execute({ text: 'merge without the required noun', workspace: 'C:\\proj', modelId: 'k3.1-pro' });
+  assert.match(miss.text, /0 条会命中/);
+  const item = store.get().triggers.find((trigger) => trigger.id === 't-check');
+  assert.equal(item.triggerCount, 0);
+  assert.equal(item.hits, 0);
+  assert.equal(item.injectedCount, 0);
+  assert.equal(item.falsePositiveCount, 0);
+});
+
+test('误报达到阈值才提醒处理，反馈本身不修改经验', async () => {
+  const store = createStore(createEmptyState());
+  const tools = Object.fromEntries(createTools(store, { falsePositiveThreshold: 2 }).map((item) => [item.name, item]));
+  await tools.experience_add.execute({ id: 't-feedback', hint: '先查再改。', keywords: ['修改'] });
+  const first = await tools.experience_feedback.execute({ id: 't-feedback', outcome: 'irrelevant', reason: '只是讨论修改原则' });
+  assert.doesNotMatch(first.text, /需要处理/);
+  await tools.experience_feedback.execute({ id: 't-feedback', outcome: 'useful' });
+  const second = await tools.experience_feedback.execute({ id: 't-feedback', outcome: 'irrelevant', reason: '没有实际改动' });
+  assert.match(second.text, /需要处理/);
+  assert.match(second.text, /误报 2/);
+  assert.match(second.text, /experience_update/);
+  const item = store.get().triggers.find((trigger) => trigger.id === 't-feedback');
+  assert.equal(item.falsePositiveCount, 2);
+  assert.equal(item.usefulCount, 1);
+  assert.equal(item.hint, '先查再改。');
+  assert.deepEqual(item.keywords, ['修改']);
+  assert.equal(item.lastFeedbackReason, '没有实际改动');
+});
+
+test('默认误报阈值为 5，可按条目忽略后续误报', async () => {
+  const store = createStore(createEmptyState());
+  const tools = Object.fromEntries(createTools(store).map((item) => [item.name, item]));
+  await tools.experience_add.execute({ id: 't-feedback-default', hint: '先核对再提醒。', keywords: ['提醒'] });
+  for (let count = 1; count <= 4; count += 1) {
+    const response = await tools.experience_feedback.execute({ id: 't-feedback-default', outcome: 'irrelevant' });
+    assert.doesNotMatch(response.text, /需要处理/);
+  }
+  const fifth = await tools.experience_feedback.execute({ id: 't-feedback-default', outcome: 'irrelevant', reason: '第五次误报' });
+  assert.match(fifth.text, /需要处理/);
+  assert.match(fifth.text, /误报 5/);
+
+  store.replace(recordTrigger(recordTrigger(store.get(), 't-feedback-default', 100), 't-feedback-default', 200));
+  await tools.experience_update.execute({ id: 't-feedback-default', ignoreFalsePositives: true });
+  const before = store.get().triggers.find((trigger) => trigger.id === 't-feedback-default');
+  const ignored = await tools.experience_feedback.execute({ id: 't-feedback-default', outcome: 'irrelevant', reason: '已知必要噪声' });
+  assert.match(ignored.text, /已忽略误报反馈/);
+  assert.doesNotMatch(ignored.text, /需要处理/);
+  const after = store.get().triggers.find((trigger) => trigger.id === 't-feedback-default');
+  assert.equal(after.triggerCount, 2);
+  assert.equal(after.hits, 2);
+  assert.equal(after.falsePositiveCount, 5);
+  assert.equal(after.lastFeedbackAt, before.lastFeedbackAt);
+  assert.equal(after.lastFeedbackReason, '第五次误报');
+
+  const useful = await tools.experience_feedback.execute({ id: 't-feedback-default', outcome: 'useful' });
+  assert.doesNotMatch(useful.text, /需要处理/);
+  assert.equal(store.get().triggers.find((trigger) => trigger.id === 't-feedback-default').usefulCount, 1);
+  await tools.experience_update.execute({ id: 't-feedback-default', ignoreFalsePositives: false });
+  const resumed = await tools.experience_feedback.execute({ id: 't-feedback-default', outcome: 'irrelevant' });
+  assert.match(resumed.text, /误报 6/);
+  const invalid = await tools.experience_update.execute({ id: 't-feedback-default', ignoreFalsePositives: 'yes' });
+  assert.match(invalid.text, /未修改/);
+});
+
+test('经验包默认不含统计，导入先预览且重复提交不新增', async () => {
+  const source = createStore(normalizeState({ triggers: [] }));
+  const sourceTools = Object.fromEntries(createTools(source).map((item) => [item.name, item]));
+  await sourceTools.experience_add.execute({ id: 't-export', hint: '先验证再分享。', keywords: ['export'], ignoreFalsePositives: true });
+  source.replace(recordInjections(recordTrigger(source.get(), 't-export', 100), ['t-export']));
+  const exported = await sourceTools.experience_export.execute({});
+  const data = JSON.parse(exported.text);
+  assert.equal(data.format, 'dsh-experience-book');
+  assert.equal(data.version, 1);
+  const exportedTrigger = data.triggers.find((item) => item.id === 't-export');
+  assert.ok(exportedTrigger);
+  assert.equal(exportedTrigger.triggerCount, 0);
+  assert.equal(exportedTrigger.injectedCount, 0);
+  assert.equal(exportedTrigger.ignoreFalsePositives, true);
+  const withStats = JSON.parse((await sourceTools.experience_export.execute({ includeStats: true })).text);
+  assert.equal(withStats.triggers.find((item) => item.id === 't-export').triggerCount, 1);
+  assert.equal(withStats.triggers.find((item) => item.id === 't-export').injectedCount, 1);
+
+  const target = createStore(normalizeState({ triggers: [] }));
+  const targetTools = Object.fromEntries(createTools(target).map((item) => [item.name, item]));
+  const copy = { ...exportedTrigger, id: 't-export-copy' };
+  const input = JSON.stringify({ ...data, triggers: [exportedTrigger, copy] });
+  const preview = await targetTools.experience_import.execute({ data: input });
+  assert.match(preview.text, /可导入 1 条；跳过 1 条/);
+  assert.match(preview.text, /存储未变/);
+  assert.equal(target.get().triggers.length, 0);
+  const committed = await targetTools.experience_import.execute({ data: input, commit: true });
+  assert.match(committed.text, /已导入经验/);
+  assert.equal(target.get().triggers.length, 1);
+  assert.equal(target.get().triggers[0].ignoreFalsePositives, true);
+  const repeated = await targetTools.experience_import.execute({ data: input, commit: true });
+  assert.match(repeated.text, /可导入 0 条；跳过 2 条/);
+  assert.equal(target.get().triggers.length, 1);
+  assert.equal(target.get().triggers[0].triggerCount, 0);
+  const invalid = await targetTools.experience_import.execute({
+    data: { format: 'dsh-experience-book', version: 1, triggers: [null] },
+  });
+  assert.match(invalid.text, /可导入 0 条；跳过 1 条/);
 });
 
 function assertIdentifiedMessage(message) {
@@ -556,6 +689,38 @@ test('持久化：服务缺失时标明仅内存，注入消息仍带完整身�
   __resetExperienceBookForTests();
 });
 
+test('回合收尾批量提示分别记录触发与成功注入', async () => {
+  __resetExperienceBookForTests();
+  const harness = createHarness();
+  apply(harness.ctx, { seedOnFirstRun: false });
+  await harness.tools.get('experience_add').execute({
+    id: 't-batch-stats',
+    kind: 'output',
+    keywords: ['batchstats'],
+    hint: '先核对批量提示统计。',
+  });
+  const emit = (event) => {
+    for (const handler of harness.handlers.get('session/event') ?? []) handler(harness.session, event);
+  };
+  emit({
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', content: [{ type: 'text', text: 'batchstats' }] } },
+  });
+  let item = __experienceBookStateForTests().store.get().triggers.find((trigger) => trigger.id === 't-batch-stats');
+  assert.equal(item.triggerCount, 1);
+  assert.equal(item.hits, 1);
+  assert.equal(item.injectedCount, 0);
+  assert.equal(harness.injected.length, 0);
+  for (const handler of harness.handlers.get('agent/turn-stopping') ?? []) {
+    await handler({ agent: harness.agent });
+  }
+  item = __experienceBookStateForTests().store.get().triggers.find((trigger) => trigger.id === 't-batch-stats');
+  assert.equal(item.triggerCount, 1);
+  assert.equal(item.injectedCount, 1);
+  assert.equal(harness.injected.length, 1);
+  __resetExperienceBookForTests();
+});
+
 test('同一回合命中超过上限时只注入 maxHintsPerTurn 条', async () => {
   __resetExperienceBookForTests();
   const harness = createHarness();
@@ -721,6 +886,19 @@ test('系统条目只收通用做法且带 system 分类', () => {
     JSON.stringify(SYSTEM_SEEDS),
     /paihuo|派活|pwsh|personal|t-fullrun|t-merge|t-reuse/i,
   );
+});
+
+test('英文输出经验使用明确短语，宽泛单词不误触', () => {
+  const state = createEmptyState();
+  const claim = state.triggers.find((item) => item.id === 't-claim-verified');
+  const visual = state.triggers.find((item) => item.id === 't-visual-evidence');
+  assert.equal(matchesTrigger(claim, 'output', 'Verification passed after running the focused suite.', undefined), true);
+  assert.equal(matchesTrigger(claim, 'output', "I've verified the output.", undefined), true);
+  assert.equal(matchesTrigger(claim, 'output', 'I should verify this before claiming a result.', undefined), false);
+  assert.equal(matchesTrigger(claim, 'output', 'The test is still running.', undefined), false);
+  assert.equal(matchesTrigger(visual, 'output', 'The screenshot shows the new layout.', undefined), true);
+  assert.equal(matchesTrigger(visual, 'output', 'The image shows two panels.', undefined), true);
+  assert.equal(matchesTrigger(visual, 'output', 'I need to take a screenshot first.', undefined), false);
 });
 
 test('公开系统提示与工具说明不依赖本地条目或其他插件', () => {
