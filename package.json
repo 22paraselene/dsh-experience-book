@@ -1,8 +1,9 @@
 {
   "name": "@local/dsh-experience-book",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "自成长工作经验书：按输出关键词、工具报错和工具调用触发一句话经验提示；内置 system/model 类型与可隔离的系统条目（全局生效）",
+  "license": "MIT",
+  "description": "自成长工作经验书：按输出关键词、工具报错和工具调用触发一句话经验提示；system 分类与可隔离的系统条目（全局生效），model 条件可按模型 ID 门控",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
@@ -20,7 +21,8 @@
     "lib/seeds/index.js",
     "lib/seeds/system.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

@@ -60,8 +60,8 @@ test('存储 schema 拒绝 null：null 是“从未写入”哨兵', () => {
 });
 
 test('normalizeState 对坏输入回退为空状态，不复活种子', () => {
-  assert.deepEqual(normalizeState(null), { version: 4, migrations: [3, 4], triggers: [] });
-  assert.deepEqual(normalizeState({ triggers: 'no' }), { version: 4, migrations: [3, 4], triggers: [] });
+  assert.deepEqual(normalizeState(null), { version: 5, migrations: [3, 4, 5], triggers: [] });
+  assert.deepEqual(normalizeState({ triggers: 'no' }), { version: 5, migrations: [3, 4, 5], triggers: [] });
   const state = normalizeState({ triggers: [trigger(), { id: 'BAD ID' }, null] });
   assert.equal(state.triggers.length, 1);
   assert.equal(state.triggers[0].id, 't-test');
@@ -331,21 +331,39 @@ test('turn-start 每轮触发一次，且不允许关键词条件', () => {
   assert.equal(scopeLabel(accepted.trigger), 'mode');
 });
 
-test('v3 状态升级补迁移 4，并给已有系统种子打 system 分类', () => {
+test('v3/v4 状态升级：补迁移 5，把旧 type 拆成 system 与 model', () => {
   const v3 = {
     version: 3,
     migrations: [3],
     triggers: [
-      trigger({ id: 't-claim-verified', type: '' }),
+      trigger({ id: 't-claim-verified' }),
       trigger({ id: 't-custom' }),
     ],
   };
-  const { state } = upgradeState(v3);
-  assert.equal(state.version, 4);
-  assert.deepEqual(state.migrations, [3, 4]);
-  assert.equal(state.triggers.find((item) => item.id === 't-claim-verified').type, 'system');
-  assert.equal(state.triggers.find((item) => item.id === 't-custom').type, '');
-  assert.equal(upgradeState(state).added.length, 0);
+  const v3Result = upgradeState(v3).state;
+  assert.equal(v3Result.version, 5);
+  assert.deepEqual(v3Result.migrations, [3, 4, 5]);
+  assert.equal(v3Result.triggers.find((item) => item.id === 't-claim-verified').system, true);
+  assert.equal(v3Result.triggers.find((item) => item.id === 't-custom').system, false);
+
+  const v4 = {
+    version: 4,
+    migrations: [3, 4],
+    triggers: [
+      trigger({ id: 't-claim-verified', type: 'system' }),
+      trigger({ id: 't-model', type: 'model', model: 'deepseek-.*' }),
+      trigger({ id: 't-plain', type: '' }),
+    ],
+  };
+  const v4Result = upgradeState(v4).state;
+  assert.equal(v4Result.version, 5);
+  assert.deepEqual(v4Result.migrations, [3, 4, 5]);
+  assert.equal(v4Result.triggers.find((item) => item.id === 't-claim-verified').system, true);
+  const modelTrigger = v4Result.triggers.find((item) => item.id === 't-model');
+  assert.equal(modelTrigger.system, false);
+  assert.equal(modelTrigger.model, 'deepseek-.*');
+  assert.equal(v4Result.triggers.find((item) => item.id === 't-plain').system, false);
+  assert.equal(upgradeState(v4Result).added.length, 0);
 });
 
 test('工具写入保留迁移标记', async () => {
@@ -353,10 +371,10 @@ test('工具写入保留迁移标记', async () => {
   const tools = Object.fromEntries(createTools(store).map((item) => [item.name, item]));
 
   await tools.experience_add.execute({ hint: '先查父目录再建目录。', id: 't-tool-probe', keywords: ['__tool_probe__'] });
-  assert.deepEqual(store.get().migrations, [3, 4]);
+  assert.deepEqual(store.get().migrations, [3, 4, 5]);
 
   await tools.experience_remove.execute({ ids: ['t-tool-probe'] });
-  assert.deepEqual(store.get().migrations, [3, 4]);
+  assert.deepEqual(store.get().migrations, [3, 4, 5]);
   assert.equal(store.get().triggers.some((item) => item.id === 't-tool-probe'), false);
 });
 
@@ -637,51 +655,56 @@ test('经验改工具名后同一实例立刻命中，不要求重载', async ()
   __resetExperienceBookForTests();
 });
 
-test('system 类型只是分类，不改变匹配', () => {
-  const system = trigger({ type: 'system', keywords: ['系统分类探针'] });
+test('system 是分类字段，不改变匹配', () => {
+  const system = trigger({ system: true, keywords: ['系统分类探针'] });
   assert.equal(matchesTrigger(system, 'output', '系统分类探针命中', undefined, ''), true);
   assert.match(describeMatch(system), /系统条目/);
 });
 
-test('model 类型按模型 ID 正则门控，模型未知不触发', () => {
+test('model 是独立条件，按模型 ID 正则门控，模型未知不触发', () => {
   const built = buildTrigger({
     hint: '在匹配的模型上先查上下文再回答。',
     keywords: ['模型门控探针'],
-    type: 'model',
     model: 'deepseek-.*',
   });
   assert.equal(built.ok, true);
   const modelTrigger = built.trigger;
+  assert.equal(modelTrigger.system, false);
   assert.equal(matchesTrigger(modelTrigger, 'output', '模型门控探针', undefined, 'deepseek-chat'), true);
   assert.equal(matchesTrigger(modelTrigger, 'output', '模型门控探针', undefined, 'DeepSeek-Reasoner'), true);
   assert.equal(matchesTrigger(modelTrigger, 'output', '模型门控探针', undefined, 'gpt-4o'), false);
   assert.equal(matchesTrigger(modelTrigger, 'output', '模型门控探针', undefined, ''), false);
-  assert.match(describeMatch(modelTrigger), /模型/);
+
+  const both = buildTrigger({
+    hint: '系统示例只在匹配模型上触发。',
+    keywords: ['叠加探针'],
+    system: true,
+    model: 'deepseek-.*',
+  });
+  assert.equal(both.ok, true);
+  assert.equal(both.trigger.system, true);
+  assert.equal(matchesTrigger(both.trigger, 'output', '叠加探针', undefined, 'deepseek-chat'), true);
+  assert.equal(matchesTrigger(both.trigger, 'output', '叠加探针', undefined, 'gpt-4o'), false);
 });
 
-test('type/model 写入校验', () => {
-  const missingModel = buildTrigger({ hint: '缺模型正则。', keywords: ['x'], type: 'model' });
-  assert.equal(missingModel.ok, false);
-  assert.match(missingModel.error, /model 正则/);
-
-  const badModel = buildTrigger({ hint: '坏模型正则。', keywords: ['x'], type: 'model', model: '[' });
+test('system/model 写入校验', () => {
+  const badModel = buildTrigger({ hint: '坏模型正则。', keywords: ['x'], model: '[' });
   assert.equal(badModel.ok, false);
   assert.match(badModel.error, /model 正则编译失败/);
 
-  const strayModel = buildTrigger({ hint: '普通条目带模型。', keywords: ['x'], model: 'gpt' });
-  assert.equal(strayModel.ok, false);
+  const badSystem = buildTrigger({ hint: '非法分类。', keywords: ['x'], system: 'yes' });
+  assert.equal(badSystem.ok, false);
+  assert.match(badSystem.error, /system 只能是布尔值/);
 
-  const badType = buildTrigger({ hint: '非法类型。', keywords: ['x'], type: 'other' });
-  assert.equal(badType.ok, false);
-
-  const system = buildTrigger({ hint: '系统分类条目。', keywords: ['x'], type: 'system' });
-  assert.equal(system.ok, true);
-  assert.equal(system.trigger.type, 'system');
+  const both = buildTrigger({ hint: '系统分类条目。', keywords: ['x'], system: true, model: 'deepseek-.*' });
+  assert.equal(both.ok, true);
+  assert.equal(both.trigger.system, true);
+  assert.equal(both.trigger.model, 'deepseek-.*');
 });
 
 test('系统条目只收通用做法且带 system 分类', () => {
   const state = createEmptyState();
-  const systems = state.triggers.filter((item) => item.type === 'system');
+  const systems = state.triggers.filter((item) => item.system === true);
   assert.equal(systems.length, SYSTEM_SEEDS.length);
   const ids = systems.map((item) => item.id);
   assert.ok(ids.includes('t-claim-verified'));
@@ -706,7 +729,7 @@ test('公开系统提示与工具说明不依赖本地条目或其他插件', ()
   apply(harness.ctx, { seedOnFirstRun: false });
   const section = harness.sections.find((item) => item.name === 'experience-book');
   assert.ok(section);
-  assert.match(section.text, /填 mode 只在指定会话模式触发/);
+  assert.match(section.text, /留空=不加限制/);
   assert.doesNotMatch(section.text, /paihuo|派活|personal|t-fullrun|t-merge|t-reuse/i);
 
   const definitions = createTools(createStore({ triggers: [] }));
